@@ -475,6 +475,8 @@ def generate_playlistdir(playlist):
 
 
 def create_playlistfile(playlist, songpaths, playlistdir, m3ufilename):
+    if songpaths == None or len(songpaths) == 0:
+        return
     Debug.print("\nCreating playlist file...")
     if m3ufilename == "unlisted":
         print('WARNING: This playlist is called "unlisted". All unlisted songs will be put into this playlist file too, and thus might overwrite anything that might be in here, or vice versa.')
@@ -511,7 +513,7 @@ def download_songs(songs, outdir, outputformat, createplaylistfile, ytdlpcmd, ff
                 if returncode != 0:
                     errors += 1
                     Debug.print(f'An error (code {returncode}) occurred downloading song: {song.title} | {song.artists} | {song.album} | {song.link}', 1)
-                else:
+                elif output_filename != None:
                     playlist_songpaths.append(output_filename)
             else:
                 Debug.print(f'Skipping song with no download link: {song.title} | {song.artists} | {song.album}', 2)
@@ -535,7 +537,7 @@ def parse_outputformat(outputformat, song):
 def sanitise(metadata):
     return metadata.replace('\\', "\\\\").replace("'", "\\'").replace('"', '\\"')
 
-def run_ytdlp_on_song(song, outdir, file_name, ytdlpcmd, ffmpegpath, configpath):
+def run_ytdlp_on_song(song, outdir, outputformat, ytdlpcmd, ffmpegpath, configpath):
     Debug.print(f'Downloading song... {song.playlist} | {song.title} | {song.artists} | {song.album} | {song.link}', 1)
     verbose_opt = ""
     if Debug.quiet or Debug.verbosity <= 1:
@@ -550,9 +552,9 @@ def run_ytdlp_on_song(song, outdir, file_name, ytdlpcmd, ffmpegpath, configpath)
 
     escaped_outdir = sanitise(outdir)
 
-    command_download = f'{ytdlpcmd} --ffmpeg-location {shlex.quote(ffmpegpath)} \
+    command_download = f'{shlex.quote(ytdlpcmd)} --ffmpeg-location {shlex.quote(ffmpegpath)} \
 --embed-metadata --parse-metadata "{title}:%(meta_title)s" --parse-metadata "{artists}:%(meta_artist)s" --parse-metadata "{album}:%(meta_album)s" \
---config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(file_name)} {verbose_opt}-- {shlex.quote(song.link)}'
+--config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(outputformat)} {verbose_opt}-- {shlex.quote(song.link)}'
     
     Debug.print(f'command: {command_download}\n\n', 2)
     command_args = shlex.split(command_download)
@@ -561,15 +563,19 @@ def run_ytdlp_on_song(song, outdir, file_name, ytdlpcmd, ffmpegpath, configpath)
 
     # run in simulate mode and print filepath to stdin
     Debug.print('Simulating download and printing filepath...', 2)
-    command_filename = f'{ytdlpcmd} --print after_move:filepath --quiet \
---config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(file_name)} -- {shlex.quote(song.link)}'
+    command_filename = f'{shlex.quote(ytdlpcmd)} --print after_move:filepath --quiet \
+--config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(outputformat)} -- {shlex.quote(song.link)}'
     
     Debug.print(f'command: {command_filename}\n\n', 2)
     command_args_print = shlex.split(command_filename)
-    proc_print = subprocess.run(command_args_print, stdout=subprocess.PIPE)
-    file_name = proc_print.stdout.split(b'\\')[-1].decode().strip()
+    proc_print = subprocess.run(command_args_print, shell=True, stdout=subprocess.PIPE)
     Debug.print(f"YT-DLP exited with code {proc_print.returncode}", 2)
-    Debug.print(f"File stored at: {os.path.join(outdir, file_name)}", 0)
+    try:
+        file_name = proc_print.stdout.split(b'\\')[-1].decode(encoding='mbcs', errors='strict').strip() # if this throws an error, i should probably just clean up all file names in the first place
+        Debug.print(f"File stored at: {os.path.join(outdir, file_name)}", 0)
+    except UnicodeDecodeError as err:
+        print(f"Failed to decode file name from stdout for {outputformat}. Not adding this song to m3u8 file.")
+        return (proc.returncode, None)
 
 
     return (proc.returncode, file_name)
