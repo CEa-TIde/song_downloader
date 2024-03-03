@@ -1,3 +1,4 @@
+import os
 import sys
 import csv
 import argparse
@@ -58,9 +59,8 @@ parser = argparse.ArgumentParser(
             - yt-dlp (youtube-dl fork). Github: https://github.com/yt-dlp/yt-dlp
             - ffmpeg. Website: https://ffmpeg.org/
         
-        Github page: <blank>
+        Github page: https://github.com/CEa-TIde/song_downloader
     ''')
-    #"Dependencies: yt-dlp (youtube-dl fork): https://github.com/yt-dlp/yt-dlp and ffmpeg: https://ffmpeg.org/"
 )
 parse_group = parser.add_mutually_exclusive_group(required=True)
 parse_group.add_argument('-c', '--convert', action='store_true', help='Converts a txt file to a csv file. Fields should be in the same order as the csv. Use -f flag for info on format.')
@@ -84,7 +84,7 @@ parser.add_argument('--ytdlp-cmd', action='store', default='C:/Program Files/ytd
 parser.add_argument('-o', '--output', action='store', default="%%(artists) -- %%(title)", help="Music file output format. '%%(field)' will be replaced with value, where field can be title/artists/album/playlist/link. \
 Because this is python, you should enter it with a double '%%': '%%%%(field)'. \
 Special characters not allowed in file names are stripped, where '\\', '|', and '/' become ' - '. (default: '%%(artists) --  %%(title)')")
-parser.add_argument('-p', '--playlist', action='store_true', help="Create a playlist file (.m3u8) for each playlist. This option does nothing yet.")
+parser.add_argument('-p', '--playlist', action='store_true', help="Create a playlist file (.m3u8) for each playlist. All unlisted songs are linked in 'unlisted.m3u8'")
 
 parser.add_argument('-v', '--verbose', action='count', default=0, help="Output more detailed log output.")
 parser.add_argument('--quiet', action='store_true', help="Output nothing to console. This option overwrites -v")
@@ -103,7 +103,7 @@ class Debug:
     verbosity = 0
 
     @classmethod
-    def print(cls, msg='', verbosity=1):
+    def print(cls, msg='', verbosity=0):
         if not cls.quiet and cls.verbosity >= verbosity:
             print(msg)
 
@@ -173,11 +173,11 @@ def print_parsestats(stats, isdownload=False):
     if isdownload:
         if stats['nolink'] > 0:
             Debug.print(f"{stats['nolink']}/{stats['total']} do not have a link specified and were skipped.", verbosity)
-        Debug.print(f"{stats['skipped_total'] + stats['nolink']}/{stats['total']} songs were skipped overall.", verbosity)
+        Debug.print(f"{stats['skipped_total_dl']}/{stats['total']} songs were skipped overall, leaving {stats['total'] - stats['skipped_total_dl']} remaining.", verbosity)
     else:
         if stats['nolink'] > 0:
             Debug.print(f"Warning: {stats['nolink']} songs did not have a link specified, and will be skipped if trying to download.", verbosity)
-        Debug.print(f"{stats['skipped_total']}/{stats['total']} songs were skipped overall.", verbosity)
+        Debug.print(f"{stats['skipped_total']}/{stats['total']} songs were skipped overall, leaving {stats['total'] - stats['skipped_total']} remaining.", verbosity)
     Debug.print('-----------------\n', verbosity)
 
 def parse_txtheader(lines):
@@ -211,7 +211,7 @@ def parse_txtheader(lines):
     return (playlists, i)
 
 def parse_txtsongs(lines, i, allowed_playlists=None, ignore_noplaylist=False, skip_dupes=False):
-    songs = []
+    songs = {"UNLISTED": []}
     curr_playlist = ""
     total = 0
     nolink = 0
@@ -219,6 +219,7 @@ def parse_txtsongs(lines, i, allowed_playlists=None, ignore_noplaylist=False, sk
     skipped_notallowed = 0
     skipped_dupes = 0
     skipped_total = 0
+    skipped_total_dl = 0
     skipped_skip = 0
 
     skipping_songs = False
@@ -234,6 +235,7 @@ def parse_txtsongs(lines, i, allowed_playlists=None, ignore_noplaylist=False, sk
             curr_playlist = trimmed_line[9:].replace("\"", "\"\"")
             playlist_songs = []
             skipping_songs = False
+            songs[curr_playlist] = []
         elif trimmed_line == "SKIP":
             skipping_songs = True
         elif trimmed_line == "END SKIP":
@@ -290,16 +292,24 @@ def parse_txtsongs(lines, i, allowed_playlists=None, ignore_noplaylist=False, sk
 
             if shouldSkip:
                 Debug.print(f'Skipping song: {curr_playlist} | {title} | {artists} | {album} | {link}', 2)
+                skipped_total_dl += 1
                 skipped_total += 1
                 continue
+            elif link == None or link == "":
+                skipped_total_dl += 1
+
 
             song = Song(title, artists, album, curr_playlist, link)
             Debug.print(f"playlist: {song.playlist} | song: {song.title} | artists: {song.artists} | album: {song.album} | link: {song.link}", 2)
-            songs.append(song)
+            if curr_playlist == "":
+                songs["UNLISTED"].append(song)
+            else:
+                songs[song.playlist].append(song)
     
     stats = {
         'total': total,
         'skipped_total': skipped_total,
+        'skipped_total_dl': skipped_total_dl,
         'skipped_noplaylist': skipped_noplaylist,
         'ignore_noplaylist': ignore_noplaylist,
         'skipped_notallowed': skipped_notallowed,
@@ -347,9 +357,10 @@ def write_csvfile(csvfile, songs):
             dictwriter.writeheader()
             csvwriter = csv.writer(writer)
             try:
-                for song in songs:
-                    csvwriter.writerow([song.playlist, song.title, song.artists, song.album, song.link])
-                    Debug.print(f"playlist: {song.playlist} | song: {song.title} | artists: {song.artists} | album: {song.album} | link: {song.link}", 2)
+                for playlist in songs:
+                    for song in songs[playlist]:
+                        csvwriter.writerow([song.playlist, song.title, song.artists, song.album, song.link])
+                        Debug.print(f"playlist: {song.playlist} | song: {song.title} | artists: {song.artists} | album: {song.album} | link: {song.link}", 2)
             except csv.Error as e:
                 sys.exit('file {}, line {}: {}'.format(csvfile, csvwriter.line_num, e))
 
@@ -362,9 +373,10 @@ def read_csvfile(csvfile, allowed_playlists=None, ignore_noplaylist=False, skip_
         print("csv file could not be opened to read from.")
         exit(4)
     else:
-        songs = []
+        songs = {"UNLISTED": []}
         total = 0
         skipped_total = 0
+        skipped_total_dl = 0
         nolink = 0
         skipped_noplaylist = 0
         skipped_notallowed = 0
@@ -411,20 +423,30 @@ def read_csvfile(csvfile, allowed_playlists=None, ignore_noplaylist=False, skip_
                         shouldskip = True
                     elif not shouldskip:
                         song_dict[playlist].append(title + artists)
-
+                    
                     if shouldskip:
                         Debug.print(f'Skipping song: {playlist} | {title} | {artists} | {album} | {link}', 2)
+                        skipped_total_dl += 1
                         skipped_total += 1
                         continue
+                    elif link == None or link == "":
+                        skipped_total_dl += 1
                     
 
-                    songs.append(Song(title, artists, album, playlist, link))
+                    song = Song(title, artists, album, playlist, link)
+                    if playlist == None or playlist == "":
+                        songs["UNLISTED"].append(song)
+                    else:
+                        if playlist not in songs:
+                            songs[playlist] = []
+                        songs[playlist].append(song)
             except csv.Error as e:
                 sys.exit('file {}, line {}: {}'.format(csvfile, csvreader.line_num, e))
         
         stats = {
             'total': total,
             'skipped_total': skipped_total,
+            'skipped_total_dl': skipped_total_dl,
             'skipped_noplaylist': skipped_noplaylist,
             'ignore_noplaylist': ignore_noplaylist,
             'skipped_notallowed': skipped_notallowed,
@@ -434,82 +456,122 @@ def read_csvfile(csvfile, allowed_playlists=None, ignore_noplaylist=False, skip_
             'skip_dupes': skip_dupes,
             'skipped_skip': 0 # CSV file cannot contain SKIP keyword, so this is always 0
         }
-        return songs, stats
+        return (songs, stats)
 
 
-def filter_filedir_str(str):
+def filter_file_str(str):
     return re.sub("[\\\\\\|\\/]", " - ", re.sub('["\\?\\*<>]', "", str)).strip()
 
-def generate_playlistdir(song):
-    if song.playlist != "":
-        album_dir = filter_filedir_str(song.playlist)
-        # album_dir = "".join(c for c in song.playlist if c.isalnum() or c in keepcharacters).rstrip()
-        if album_dir == "":  
+def generate_playlistdir(playlist):
+    if playlist != "" and playlist != "UNLISTED":
+        playlist_dir = filter_file_str(playlist)
+        if playlist_dir == "":  
             # generate random playlist name if the playlist name has no allowed dir characters.
-            album_dir = f"playlist_{random.randrange(0, 100000)}"
-        return album_dir
+            playlist_dir = f"playlist_{random.randrange(0, 100000)}"
+        return playlist_dir
     return ""
 
 
+
+
+def create_playlistfile(playlist, songpaths, playlistdir, m3ufilename):
+    Debug.print("\nCreating playlist file...")
+    if m3ufilename == "unlisted":
+        print('WARNING: This playlist is called "unlisted". All unlisted songs will be put into this playlist file too, and thus might overwrite anything that might be in here, or vice versa.')
+    try:
+        if m3ufilename == "" or m3ufilename == None:
+            m3ufilename = 'unlisted'
+        m3u_path = os.path.join(playlistdir, f'{m3ufilename}.m3u8')
+        Debug.print(f"Playlist file stored at: {m3u_path}\n", 0)
+        writer = open(m3u_path, 'w', encoding='utf-8')
+    except IOError as err:
+        print(f"m3u8 file could not be opened to write to.\n{err}")
+    else:
+        with writer:
+            writer.write(f"#EXTM3U\n#EXTENC:UTF-8\n#PLAYLIST:{playlist}\n")
+            for path in songpaths:
+                writer.write(f'{path}\n')
+
+
+
 def download_songs(songs, outdir, outputformat, createplaylistfile, ytdlpcmd, ffmpegpath, configpath):
+    Debug.print("Starting download...\n\n")
     errors = 0
-    for song in songs:
-        if song.link != None and song.link != "":
-            playlistdir = generate_playlistdir(song)
-            returncode = run_ytdlp_on_song(song, outdir + "/" + playlistdir, outputformat, ytdlpcmd, ffmpegpath, configpath)
-            if returncode != 0:
-                errors += 1
-                Debug.print(f'An error (code {returncode}) occurred downloading song: {song.title} | {song.artists} | {song.album} | {song.link}', 1)
-        else:
-            Debug.print(f'Skipping song with no download link: {song.title} | {song.artists} | {song.album}', 2)
-    Debug.print(f'\n{len(songs) - errors}/{len(songs)} songs were downloaded correctly.\n', 0)
+    total_songs = 0
+    for playlist in songs:
+        playlist_songpaths = []
+        playlistdir = generate_playlistdir(playlist)
+        full_playlistdir = os.path.join(outdir, playlistdir)
+        for song in songs[playlist]:
+            if song.link != None and song.link != "":
+                total_songs += 1
+                file_name = parse_outputformat(outputformat, song)
+
+                returncode, output_filename = run_ytdlp_on_song(song, full_playlistdir, file_name, ytdlpcmd, ffmpegpath, configpath)
+                if returncode != 0:
+                    errors += 1
+                    Debug.print(f'An error (code {returncode}) occurred downloading song: {song.title} | {song.artists} | {song.album} | {song.link}', 1)
+                else:
+                    playlist_songpaths.append(output_filename)
+            else:
+                Debug.print(f'Skipping song with no download link: {song.title} | {song.artists} | {song.album}', 2)
+        if createplaylistfile:
+            create_playlistfile(playlist, playlist_songpaths, full_playlistdir, playlistdir)
+    Debug.print(f'\n{total_songs - errors}/{total_songs} songs were downloaded correctly.\n', 0)
 
 
 def parse_outputformat(outputformat, song):
     if outputformat == None or outputformat == "":
         return f'{song.artists} -- {song.title}'
-    output = outputformat.replace('%%(title)', song.title).replace('%%(artists)', song.artists).replace('%%(album)', song.album).replace('%%(link)', song.link).replace('%%(playlist)', song.playlist)
-    return filter_filedir_str(output)
+    output = outputformat\
+        .replace('%%(title)', song.title)\
+        .replace('%%(artists)', song.artists)\
+        .replace('%%(artist)', song.artists)\
+        .replace('%%(album)', song.album)\
+        .replace('%%(link)', song.link)\
+        .replace('%%(playlist)', song.playlist)
+    return filter_file_str(output)
 
+def sanitise(metadata):
+    return metadata.replace('\\', "\\\\").replace("'", "\\'").replace('"', '\\"')
 
-
-def run_ytdlp_on_song(song, outdir, outputformat, ytdlpcmd, ffmpegpath, configpath):
+def run_ytdlp_on_song(song, outdir, file_name, ytdlpcmd, ffmpegpath, configpath):
     Debug.print(f'Downloading song... {song.playlist} | {song.title} | {song.artists} | {song.album} | {song.link}', 1)
     verbose_opt = ""
-    if Debug.quiet:
+    if Debug.quiet or Debug.verbosity <= 1:
         verbose_opt = "--quiet "
     elif Debug.verbosity > 1:
-        verbose_opt = "-v "
-
-    file_name = parse_outputformat(outputformat, song)
-    
-
+        verbose_opt = "-" + 'v' * (Debug.verbosity - 1) + " "
     
     # add space add the end for single-word strings, to force it to interpret it as literals
-    title = song.title if ' ' in song.title else f'{song.title} '
-    artists = song.artists if ' ' in song.artists else f'{song.artists} '
-    album = song.album if ' ' in song.album else f'{song.album} '
+    title = sanitise(song.title if ' ' in song.title else f'{song.title} ')
+    artists = sanitise(song.artists if ' ' in song.artists else f'{song.artists} ')
+    album = sanitise(song.album if ' ' in song.album else f'{song.album} ')
 
-    # keepcharacters = (' ','.','_')
-    full_outdir = outdir
-    # if song.playlist != "":
-    #     album_dir = filter_filedir_str(song.playlist)
-    #     # album_dir = "".join(c for c in song.playlist if c.isalnum() or c in keepcharacters).rstrip()
-    #     if album_dir == "":  
-    #         # generate random playlist name if the playlist name has no allowed dir characters.
-    #         album_dir = f"playlist_{random.randrange(0, 100000)}"
-    #     full_outdir = outdir + "/" + album_dir
-    
+    escaped_outdir = sanitise(outdir)
 
-    command = f'{ytdlpcmd} --ffmpeg-location "{ffmpegpath}" \
+    command_download = f'{ytdlpcmd} --ffmpeg-location {shlex.quote(ffmpegpath)} \
 --embed-metadata --parse-metadata "{title}:%(meta_title)s" --parse-metadata "{artists}:%(meta_artist)s" --parse-metadata "{album}:%(meta_album)s" \
---config-locations "{configpath}" -P "{full_outdir}" -o "{file_name}" {verbose_opt}-- "{song.link}"'
-    Debug.print(f'command: {command}\n\n', 2)
-    command_args = shlex.split(command)
+--config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(file_name)} {verbose_opt}-- {shlex.quote(song.link)}'
+    
+    Debug.print(f'command: {command_download}\n\n', 2)
+    command_args = shlex.split(command_download)
     proc = subprocess.run(command_args)
     Debug.print(f"\nYT-DLP exited with code {proc.returncode}", 2)
-    return proc.returncode
 
-# run_ytdlp_on_song("D_5JQLUyuJ0", "Transgender Dysphoria Blues TITLE", "Against Me! ARTIST", "Transgender Dysphoria Blues ALBUM", "/out", verbose=True)
+    # run in simulate mode and print filepath to stdin
+    Debug.print('Simulating download and printing filepath...', 2)
+    command_filename = f'{ytdlpcmd} --print after_move:filepath --quiet \
+--config-locations {shlex.quote(configpath)} -P {shlex.quote(escaped_outdir)} -o {shlex.quote(file_name)} -- {shlex.quote(song.link)}'
+    
+    Debug.print(f'command: {command_filename}\n\n', 2)
+    command_args_print = shlex.split(command_filename)
+    proc_print = subprocess.run(command_args_print, stdout=subprocess.PIPE)
+    file_name = proc_print.stdout.split(b'\\')[-1].decode().strip()
+    Debug.print(f"YT-DLP exited with code {proc_print.returncode}", 2)
+    Debug.print(f"File stored at: {os.path.join(outdir, file_name)}", 0)
+
+
+    return (proc.returncode, file_name)
 
 main()
